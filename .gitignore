@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# PyInstaller / build
+build/
+dist/
+*.spec
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.bak
+
+# Project local settings
+*.local
