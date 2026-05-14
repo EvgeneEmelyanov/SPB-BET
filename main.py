@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QLabel,
     QFileDialog,
+    QMessageBox,
 )
 
 @dataclass
@@ -211,6 +212,22 @@ class SbpBetProject:
 
         return gsd_file
 
+    def contains_gsd_file(self, file_path: str) -> bool:
+        """
+        Проверяет, был ли уже добавлен такой GSDML/XML файл в проект.
+        Сравнение выполняется по полному пути к файлу.
+        """
+
+        new_path = Path(file_path).resolve()
+
+        for gsd_file in self.loaded_gsd_files:
+            existing_path = Path(gsd_file.file_path).resolve()
+
+            if existing_path == new_path:
+                return True
+
+        return False
+
 class MainWindow(QMainWindow):
     """
     Главное окно IDE SBP-BET.
@@ -315,6 +332,13 @@ class MainWindow(QMainWindow):
         if not file_path:
             return
 
+        if self.project.contains_gsd_file(file_path):
+            QMessageBox.information(
+                self,
+                "Файл уже добавлен",
+                "Этот GSDML/XML файл уже добавлен в проект."
+            )
+            return
         try:
             gsd_file = self.project.add_gsd_file(file_path)
         except ET.ParseError as error:
