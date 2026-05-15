@@ -1,4 +1,5 @@
 import sys
+import json
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -11,16 +12,24 @@ from PySide6.QtWidgets import (
     QSplitter,
     QTreeWidget,
     QTreeWidgetItem,
-    QListWidget,
-    QListWidgetItem,
     QTextEdit,
     QWidget,
     QVBoxLayout,
     QLabel,
     QFileDialog,
     QMessageBox,
-    QInputDialog,
+    QTabWidget,
+    QTableWidget,
+    QTableWidgetItem,
+    QHeaderView,
 )
+
+
+@dataclass
+class GsdmlCategory:
+    category_id: str = ""
+    text_id: str = ""
+    name: str = ""
 
 
 @dataclass
@@ -48,6 +57,7 @@ class GsdmlSubmodule:
     submodule_id: str = ""
     name: str = ""
     text_id: str = ""
+    info_text: str = ""
     submodule_ident_number: str = ""
     kind: str = ""
 
@@ -62,12 +72,27 @@ class GsdmlModule:
     module_id: str = ""
     name: str = ""
     text_id: str = ""
+    info_text: str = ""
     module_ident_number: str = ""
     order_number: str = ""
     kind: str = "ModuleItem"
 
+    category_ref: str = ""
+    category_name: str = ""
+    subcategory_ref: str = ""
+    subcategory_name: str = ""
+
     submodules: list[GsdmlSubmodule] = field(default_factory=list)
 
+    attributes: dict[str, str] = field(default_factory=dict)
+
+@dataclass
+class GsdmlModuleRef:
+    module_item_target: str = ""
+    fixed_in_slots: str = ""
+    used_in_slots: str = ""
+    allowed_in_slots: str = ""
+    module: GsdmlModule | None = None
     attributes: dict[str, str] = field(default_factory=dict)
 
 
@@ -75,12 +100,27 @@ class GsdmlModule:
 class GsdmlDeviceAccessPoint:
     dap_id: str = ""
     name: str = ""
+    display_name: str = ""
     text_id: str = ""
+
     module_ident_number: str = ""
     fixed_in_slots: str = ""
+    physical_slots: str = ""
+    dns_compatible_name: str = ""
+    order_number: str = ""
+    hardware_release: str = ""
+    software_release: str = ""
+    info_text: str = ""
+
+    category_ref: str = ""
+    category_name: str = ""
+    subcategory_ref: str = ""
+    subcategory_name: str = ""
+
     graphics_ref: str = ""
 
     submodules: list[GsdmlSubmodule] = field(default_factory=list)
+    module_refs: list[GsdmlModuleRef] = field(default_factory=list)
 
     attributes: dict[str, str] = field(default_factory=dict)
 
@@ -95,6 +135,7 @@ class GsdmlDevice:
     family: str = ""
 
     texts: dict[str, str] = field(default_factory=dict)
+    categories: dict[str, GsdmlCategory] = field(default_factory=dict)
     graphics: list[GsdmlGraphic] = field(default_factory=list)
 
     device_access_points: list[GsdmlDeviceAccessPoint] = field(default_factory=list)
@@ -118,14 +159,6 @@ class ProjectGsdFile:
     device: GsdmlDevice = field(default_factory=GsdmlDevice)
 
     @property
-    def vendor_id(self) -> str:
-        return self.device.vendor_id
-
-    @property
-    def device_id(self) -> str:
-        return self.device.device_id
-
-    @property
     def vendor_name(self) -> str:
         return self.device.vendor_name
 
@@ -133,26 +166,13 @@ class ProjectGsdFile:
     def device_name(self) -> str:
         return self.device.device_name
 
-    @property
-    def texts(self) -> dict[str, str]:
-        return self.device.texts
-
 
 @dataclass
 class ProjectDeviceInstance:
-    """
-    Экземпляр устройства, добавленный в проект.
-
-    Это уже не GSDML-файл в каталоге, а конкретное устройство
-    внутри дерева проекта.
-    """
-
     instance_name: str
     source_gsd_file_index: int
     gsd_file: ProjectGsdFile
     selected_dap: GsdmlDeviceAccessPoint
-
-    assigned_modules: list[GsdmlModule] = field(default_factory=list)
 
 
 class GsdmlReader:
@@ -184,13 +204,26 @@ class GsdmlReader:
         device = GsdmlDevice()
 
         device.texts = GsdmlReader.read_external_texts(root)
+        device.categories = GsdmlReader.read_category_list(root, device.texts)
         device.graphics = GsdmlReader.read_graphics_list(root, path)
 
         GsdmlReader.read_device_identity(root, device)
         GsdmlReader.read_device_function(root, device)
 
-        device.device_access_points = GsdmlReader.read_device_access_points(root, device.texts)
-        device.modules = GsdmlReader.read_modules(root, device.texts)
+        device.modules = GsdmlReader.read_modules(root, device.texts, device.categories)
+
+        modules_by_id = {
+            module.module_id: module
+            for module in device.modules
+            if module.module_id
+        }
+
+        device.device_access_points = GsdmlReader.read_device_access_points(
+            root,
+            device.texts,
+            device.categories,
+            modules_by_id,
+        )
 
         if not device.device_name:
             device.device_name = path.stem
@@ -203,7 +236,6 @@ class GsdmlReader:
     def local_name(tag: str) -> str:
         if "}" in tag:
             return tag.split("}", 1)[1]
-
         return tag
 
     @staticmethod
@@ -211,7 +243,6 @@ class GsdmlReader:
         for element in root.iter():
             if GsdmlReader.local_name(element.tag) == local_tag_name:
                 return element
-
         return None
 
     @staticmethod
@@ -219,7 +250,6 @@ class GsdmlReader:
         for element in parent.iter():
             if GsdmlReader.local_name(element.tag) == local_tag_name:
                 return element
-
         return None
 
     @staticmethod
@@ -278,11 +308,47 @@ class GsdmlReader:
         return texts
 
     @staticmethod
+    def read_category_list(
+        root: ET.Element,
+        texts: dict[str, str],
+    ) -> dict[str, GsdmlCategory]:
+        categories: dict[str, GsdmlCategory] = {}
+
+        for element in GsdmlReader.iter_by_local_name(root, "CategoryItem"):
+            category_id = element.attrib.get("ID", "")
+            text_id = element.attrib.get("TextId", "")
+            name = GsdmlReader.resolve_text(texts, text_id)
+
+            if category_id:
+                categories[category_id] = GsdmlCategory(
+                    category_id=category_id,
+                    text_id=text_id,
+                    name=name,
+                )
+
+        return categories
+
+    @staticmethod
     def resolve_text(texts: dict[str, str], text_id: str) -> str:
         if not text_id:
             return ""
 
         return texts.get(text_id, text_id)
+
+    @staticmethod
+    def resolve_category_name(
+        categories: dict[str, GsdmlCategory],
+        category_ref: str,
+    ) -> str:
+        if not category_ref:
+            return ""
+
+        category = categories.get(category_ref)
+
+        if category is None:
+            return category_ref
+
+        return category.name or category.category_id
 
     @staticmethod
     def read_graphics_list(root: ET.Element, gsdml_file_path: Path) -> list[GsdmlGraphic]:
@@ -350,7 +416,6 @@ class GsdmlReader:
 
         if info_text_element is not None:
             text_id = info_text_element.attrib.get("TextId", "")
-
             device.info_text = GsdmlReader.resolve_text(device.texts, text_id)
             device.device_name = device.info_text
 
@@ -383,14 +448,48 @@ class GsdmlReader:
         )
 
     @staticmethod
+    def read_modules(
+        root: ET.Element,
+        texts: dict[str, str],
+        categories: dict[str, GsdmlCategory],
+    ) -> list[GsdmlModule]:
+        result: list[GsdmlModule] = []
+
+        for module_element in GsdmlReader.iter_by_local_name(root, "ModuleItem"):
+            module_info = GsdmlReader.read_module_info(module_element, texts, categories)
+
+            module = GsdmlModule(
+                module_id=module_element.attrib.get("ID", ""),
+                name=module_info["name"],
+                text_id=module_info["text_id"],
+                info_text=module_info["info_text"],
+                module_ident_number=module_element.attrib.get("ModuleIdentNumber", ""),
+                order_number=module_info["order_number"],
+                kind="ModuleItem",
+                category_ref=module_info["category_ref"],
+                category_name=module_info["category_name"],
+                subcategory_ref=module_info["subcategory_ref"],
+                subcategory_name=module_info["subcategory_name"],
+                attributes=dict(module_element.attrib),
+            )
+
+            module.submodules = GsdmlReader.read_submodules_inside(module_element, texts)
+
+            result.append(module)
+
+        return result
+
+    @staticmethod
     def read_device_access_points(
         root: ET.Element,
         texts: dict[str, str],
+        categories: dict[str, GsdmlCategory],
+        modules_by_id: dict[str, GsdmlModule],
     ) -> list[GsdmlDeviceAccessPoint]:
         result: list[GsdmlDeviceAccessPoint] = []
 
         for dap_element in GsdmlReader.iter_by_local_name(root, "DeviceAccessPointItem"):
-            module_info = GsdmlReader.read_module_info(dap_element, texts)
+            module_info = GsdmlReader.read_module_info(dap_element, texts, categories)
 
             dap = GsdmlDeviceAccessPoint(
                 dap_id=dap_element.attrib.get("ID", ""),
@@ -398,39 +497,76 @@ class GsdmlReader:
                 text_id=module_info["text_id"],
                 module_ident_number=dap_element.attrib.get("ModuleIdentNumber", ""),
                 fixed_in_slots=dap_element.attrib.get("FixedInSlots", ""),
+                physical_slots=dap_element.attrib.get("PhysicalSlots", ""),
+                dns_compatible_name=dap_element.attrib.get("DNS_CompatibleName", ""),
+                order_number=module_info["order_number"],
+                hardware_release=module_info["hardware_release"],
+                software_release=module_info["software_release"],
+                info_text=module_info["info_text"],
+                category_ref=module_info["category_ref"],
+                category_name=module_info["category_name"],
+                subcategory_ref=module_info["subcategory_ref"],
+                subcategory_name=module_info["subcategory_name"],
                 graphics_ref=GsdmlReader.read_graphics_ref(dap_element),
                 attributes=dict(dap_element.attrib),
             )
 
+            dap.display_name = GsdmlReader.make_dap_display_name(dap)
+
             dap.submodules = GsdmlReader.read_submodules_inside(dap_element, texts)
+            dap.module_refs = GsdmlReader.read_useable_modules(dap_element, modules_by_id)
 
             result.append(dap)
 
         return result
 
     @staticmethod
-    def read_modules(
-        root: ET.Element,
-        texts: dict[str, str],
-    ) -> list[GsdmlModule]:
-        result: list[GsdmlModule] = []
+    def make_dap_display_name(dap: GsdmlDeviceAccessPoint) -> str:
+        base_name = (
+            dap.category_name
+            or dap.dns_compatible_name
+            or dap.name
+            or dap.dap_id
+        )
 
-        for module_element in GsdmlReader.iter_by_local_name(root, "ModuleItem"):
-            module_info = GsdmlReader.read_module_info(module_element, texts)
+        parts = [base_name]
 
-            module = GsdmlModule(
-                module_id=module_element.attrib.get("ID", ""),
-                name=module_info["name"],
-                text_id=module_info["text_id"],
-                module_ident_number=module_element.attrib.get("ModuleIdentNumber", ""),
-                order_number=module_info["order_number"],
-                kind="ModuleItem",
-                attributes=dict(module_element.attrib),
+        if dap.software_release:
+            parts.append(dap.software_release)
+
+        if dap.order_number:
+            parts.append(dap.order_number)
+
+        return " / ".join(part for part in parts if part)
+
+    @staticmethod
+    def read_useable_modules(
+        dap_element: ET.Element,
+        modules_by_id: dict[str, GsdmlModule],
+    ) -> list[GsdmlModuleRef]:
+        result: list[GsdmlModuleRef] = []
+
+        useable_modules_element = GsdmlReader.find_first_inside(dap_element, "UseableModules")
+
+        if useable_modules_element is None:
+            return result
+
+        for ref_element in useable_modules_element:
+            if GsdmlReader.local_name(ref_element.tag) != "ModuleItemRef":
+                continue
+
+            module_target = ref_element.attrib.get("ModuleItemTarget", "")
+
+            module_ref = GsdmlModuleRef(
+                module_item_target=module_target,
+                fixed_in_slots=ref_element.attrib.get("FixedInSlots", ""),
+                used_in_slots=ref_element.attrib.get("UsedInSlots", ""),
+                allowed_in_slots=ref_element.attrib.get("AllowedInSlots", ""),
+                module=modules_by_id.get(module_target),
+                attributes=dict(ref_element.attrib),
             )
 
-            module.submodules = GsdmlReader.read_submodules_inside(module_element, texts)
-
-            result.append(module)
+            result.append(module_ref)
 
         return result
 
@@ -447,12 +583,13 @@ class GsdmlReader:
             if local_tag not in ["SubmoduleItem", "VirtualSubmoduleItem"]:
                 continue
 
-            module_info = GsdmlReader.read_module_info(element, texts)
+            module_info = GsdmlReader.read_module_info(element, texts, {})
 
             submodule = GsdmlSubmodule(
                 submodule_id=element.attrib.get("ID", ""),
                 name=module_info["name"],
                 text_id=module_info["text_id"],
+                info_text=module_info["info_text"],
                 submodule_ident_number=element.attrib.get("SubmoduleIdentNumber", ""),
                 kind=local_tag,
                 attributes=dict(element.attrib),
@@ -468,12 +605,22 @@ class GsdmlReader:
         return result
 
     @staticmethod
-    def read_module_info(element: ET.Element, texts: dict[str, str]) -> dict[str, str]:
+    def read_module_info(
+        element: ET.Element,
+        texts: dict[str, str],
+        categories: dict[str, GsdmlCategory],
+    ) -> dict[str, str]:
         result = {
             "name": "",
             "text_id": "",
             "info_text": "",
             "order_number": "",
+            "hardware_release": "",
+            "software_release": "",
+            "category_ref": "",
+            "category_name": "",
+            "subcategory_ref": "",
+            "subcategory_name": "",
         }
 
         module_info = GsdmlReader.find_first_inside(element, "ModuleInfo")
@@ -481,9 +628,19 @@ class GsdmlReader:
         if module_info is None:
             return result
 
+        category_ref = module_info.attrib.get("CategoryRef", "")
+        subcategory_ref = module_info.attrib.get("SubCategory1Ref", "")
+
+        result["category_ref"] = category_ref
+        result["subcategory_ref"] = subcategory_ref
+        result["category_name"] = GsdmlReader.resolve_category_name(categories, category_ref)
+        result["subcategory_name"] = GsdmlReader.resolve_category_name(categories, subcategory_ref)
+
         name_element = GsdmlReader.find_first_inside(module_info, "Name")
         info_text_element = GsdmlReader.find_first_inside(module_info, "InfoText")
         order_number_element = GsdmlReader.find_first_inside(module_info, "OrderNumber")
+        hardware_release_element = GsdmlReader.find_first_inside(module_info, "HardwareRelease")
+        software_release_element = GsdmlReader.find_first_inside(module_info, "SoftwareRelease")
 
         if name_element is not None:
             text_id = name_element.attrib.get("TextId", "")
@@ -503,10 +660,22 @@ class GsdmlReader:
             )
 
         if order_number_element is not None:
-            if order_number_element.attrib.get("Value", ""):
-                result["order_number"] = order_number_element.attrib.get("Value", "")
-            elif order_number_element.text:
-                result["order_number"] = order_number_element.text.strip()
+            result["order_number"] = (
+                order_number_element.attrib.get("Value", "")
+                or (order_number_element.text.strip() if order_number_element.text else "")
+            )
+
+        if hardware_release_element is not None:
+            result["hardware_release"] = (
+                hardware_release_element.attrib.get("Value", "")
+                or (hardware_release_element.text.strip() if hardware_release_element.text else "")
+            )
+
+        if software_release_element is not None:
+            result["software_release"] = (
+                software_release_element.attrib.get("Value", "")
+                or (software_release_element.text.strip() if software_release_element.text else "")
+            )
 
         return result
 
@@ -521,17 +690,13 @@ class GsdmlReader:
         if direct_ref:
             return direct_ref
 
-        graphic_ref_element = GsdmlReader.find_first_inside(element, "GraphicItemRef")
+        graphics_element = GsdmlReader.find_first_inside(element, "Graphics")
 
-        if graphic_ref_element is not None:
-            if graphic_ref_element.attrib.get("Value", ""):
-                return graphic_ref_element.attrib.get("Value", "")
+        if graphics_element is not None:
+            graphic_ref = graphics_element.attrib.get("GraphicItemTarget", "")
 
-            if graphic_ref_element.attrib.get("Ref", ""):
-                return graphic_ref_element.attrib.get("Ref", "")
-
-            if graphic_ref_element.text:
-                return graphic_ref_element.text.strip()
+            if graphic_ref:
+                return graphic_ref
 
         return ""
 
@@ -604,9 +769,7 @@ class SbpBetProject:
 
     def add_gsd_file(self, file_path: str) -> ProjectGsdFile:
         gsd_file = GsdmlReader.read(file_path)
-
         self.loaded_gsd_files.append(gsd_file)
-
         return gsd_file
 
     def contains_gsd_file(self, file_path: str) -> bool:
@@ -627,7 +790,14 @@ class SbpBetProject:
     ) -> ProjectDeviceInstance:
         gsd_file = self.loaded_gsd_files[source_gsd_file_index]
 
-        base_name = gsd_file.device.device_name or gsd_file.file_name
+        base_name = (
+            selected_dap.category_name
+            or selected_dap.dns_compatible_name
+            or selected_dap.name
+            or gsd_file.device.device_name
+            or gsd_file.file_name
+        )
+
         instance_number = len(self.device_instances) + 1
 
         instance = ProjectDeviceInstance(
@@ -642,19 +812,15 @@ class SbpBetProject:
         return instance
 
 
-class HardwareCatalogList(QListWidget):
-    """
-    Правый список GSDML-файлов.
-
-    Из него можно перетаскивать устройство в дерево проекта.
-    """
-
-    MIME_TYPE = "application/x-sbp-bet-gsd-file-index"
+class HardwareCatalogTree(QTreeWidget):
+    MIME_TYPE = "application/x-sbp-bet-hardware-catalog-item"
 
     def __init__(self, parent=None):
         super().__init__(parent)
+
+        self.setHeaderLabels(["Hardware Catalog"])
         self.setDragEnabled(True)
-        self.setSelectionMode(QListWidget.SingleSelection)
+        self.setSelectionMode(QTreeWidget.SingleSelection)
 
     def startDrag(self, supported_actions):
         item = self.currentItem()
@@ -662,14 +828,22 @@ class HardwareCatalogList(QListWidget):
         if item is None:
             return
 
-        file_index = item.data(Qt.UserRole)
+        payload = item.data(0, Qt.UserRole)
 
-        if file_index is None:
+        if not isinstance(payload, dict):
+            return
+
+        # Перетаскиваем только DAP.
+        # ModuleItem пока остаётся справочной частью каталога.
+        if payload.get("type") != "dap":
             return
 
         mime = QMimeData()
-        mime.setData(self.MIME_TYPE, str(file_index).encode("utf-8"))
-        mime.setText(item.text())
+        mime.setData(
+            self.MIME_TYPE,
+            json.dumps(payload).encode("utf-8"),
+        )
+        mime.setText(item.text(0))
 
         drag = QDrag(self)
         drag.setMimeData(mime)
@@ -677,47 +851,43 @@ class HardwareCatalogList(QListWidget):
 
 
 class ProjectTree(QTreeWidget):
-    """
-    Левое дерево проекта.
-
-    Принимает drag-and-drop из HardwareCatalogList.
-    """
-
-    def __init__(self, on_gsd_file_dropped_callback, parent=None):
+    def __init__(self, drop_callback, parent=None):
         super().__init__(parent)
 
-        self.on_gsd_file_dropped_callback = on_gsd_file_dropped_callback
+        self.drop_callback = drop_callback
 
         self.setHeaderLabels(["Дерево проекта"])
         self.setAcceptDrops(True)
         self.setDragDropMode(QTreeWidget.DropOnly)
 
     def dragEnterEvent(self, event):
-        if event.mimeData().hasFormat(HardwareCatalogList.MIME_TYPE):
+        if event.mimeData().hasFormat(HardwareCatalogTree.MIME_TYPE):
             event.acceptProposedAction()
         else:
             event.ignore()
 
     def dragMoveEvent(self, event):
-        if event.mimeData().hasFormat(HardwareCatalogList.MIME_TYPE):
+        if event.mimeData().hasFormat(HardwareCatalogTree.MIME_TYPE):
             event.acceptProposedAction()
         else:
             event.ignore()
 
     def dropEvent(self, event):
-        if not event.mimeData().hasFormat(HardwareCatalogList.MIME_TYPE):
+        if not event.mimeData().hasFormat(HardwareCatalogTree.MIME_TYPE):
             event.ignore()
             return
 
-        raw_index = bytes(event.mimeData().data(HardwareCatalogList.MIME_TYPE)).decode("utf-8")
+        raw_payload = bytes(
+            event.mimeData().data(HardwareCatalogTree.MIME_TYPE)
+        ).decode("utf-8")
 
         try:
-            file_index = int(raw_index)
-        except ValueError:
+            payload = json.loads(raw_payload)
+        except json.JSONDecodeError:
             event.ignore()
             return
 
-        success = self.on_gsd_file_dropped_callback(file_index)
+        success = self.drop_callback(payload)
 
         if success:
             event.acceptProposedAction()
@@ -753,34 +923,62 @@ class MainWindow(QMainWindow):
     def create_main_layout(self):
         main_splitter = QSplitter(Qt.Horizontal)
 
-        self.project_tree = ProjectTree(self.on_gsd_file_dropped_to_project)
+        self.project_tree = ProjectTree(self.on_hardware_item_dropped_to_project)
         self.project_tree.itemClicked.connect(self.on_project_tree_item_clicked)
 
         root_item = QTreeWidgetItem(["Проект SBP-BET"])
         self.project_tree.addTopLevelItem(root_item)
         root_item.setExpanded(True)
 
-        self.main_text_area = QTextEdit()
-        self.main_text_area.setReadOnly(True)
-        self.main_text_area.setText(
+        self.center_tabs = QTabWidget()
+
+        self.overview_text_area = QTextEdit()
+        self.overview_text_area.setReadOnly(True)
+
+        self.io_data_table = QTableWidget()
+        self.io_data_table.setColumnCount(8)
+        self.io_data_table.setHorizontalHeaderLabels(
+            [
+                "Direction",
+                "Submodule",
+                "Name",
+                "DataType",
+                "BitLength",
+                "UseAsBits",
+                "TextId",
+                "Attributes",
+            ]
+        )
+        self.io_data_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.io_data_table.horizontalHeader().setStretchLastSection(True)
+
+        self.raw_text_area = QTextEdit()
+        self.raw_text_area.setReadOnly(True)
+
+        self.center_tabs.addTab(self.overview_text_area, "Обзор")
+        self.center_tabs.addTab(self.io_data_table, "IO Data")
+        self.center_tabs.addTab(self.raw_text_area, "Raw")
+
+        self.set_overview_text(
             "SBP-BET\n\n"
             "1. Загрузите GSDML/XML через меню Проект.\n"
-            "2. Перетащите устройство из правого каталога в левое дерево проекта.\n"
-            "3. При добавлении выберите DAP."
+            "2. Справа появится дерево Hardware Catalog.\n"
+            "3. Перетащите конкретный DAP справа налево, чтобы добавить устройство в проект.\n"
+            "4. ModuleItem справа пока используется как справочная информация."
         )
 
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
 
         right_title = QLabel("Загруженные GSDML/XML")
-        self.hardware_catalog = HardwareCatalogList()
+        self.hardware_catalog = HardwareCatalogTree()
         self.hardware_catalog.itemClicked.connect(self.on_hardware_catalog_item_clicked)
 
         right_layout.addWidget(right_title)
         right_layout.addWidget(self.hardware_catalog)
 
         main_splitter.addWidget(self.project_tree)
-        main_splitter.addWidget(self.main_text_area)
+        main_splitter.addWidget(self.center_tabs)
         main_splitter.addWidget(right_panel)
 
         main_splitter.setStretchFactor(0, 2)
@@ -788,6 +986,64 @@ class MainWindow(QMainWindow):
         main_splitter.setStretchFactor(2, 2)
 
         self.setCentralWidget(main_splitter)
+
+    def set_overview_text(self, text: str):
+        self.overview_text_area.setText(text)
+        self.center_tabs.setCurrentWidget(self.overview_text_area)
+
+    def set_raw_data(self, data):
+        self.raw_text_area.setText(
+            json.dumps(
+                data,
+                ensure_ascii=False,
+                indent=4,
+            )
+        )
+
+    def clear_io_table(self):
+        self.io_data_table.setRowCount(0)
+
+    def fill_io_table_from_submodules(self, submodules: list[GsdmlSubmodule]):
+        rows = []
+
+        for submodule in submodules:
+            for item in submodule.input_items:
+                rows.append((submodule, item))
+
+            for item in submodule.output_items:
+                rows.append((submodule, item))
+
+        self.io_data_table.setRowCount(len(rows))
+
+        for row_index, row in enumerate(rows):
+            submodule, item = row
+
+            values = [
+                item.direction,
+                submodule.name or submodule.submodule_id,
+                item.name,
+                item.data_type,
+                item.bit_length,
+                item.use_as_bits,
+                item.text_id,
+                json.dumps(item.attributes, ensure_ascii=False),
+            ]
+
+            for column_index, value in enumerate(values):
+                table_item = QTableWidgetItem(str(value))
+                table_item.setFlags(table_item.flags() ^ Qt.ItemIsEditable)
+                self.io_data_table.setItem(row_index, column_index, table_item)
+
+        self.io_data_table.resizeColumnsToContents()
+
+    def fill_io_table_from_dap(self, dap: GsdmlDeviceAccessPoint):
+        submodules = list(dap.submodules)
+
+        for module_ref in dap.module_refs:
+            if module_ref.module is not None:
+                submodules.extend(module_ref.module.submodules)
+
+        self.fill_io_table_from_submodules(submodules)
 
     def on_load_gsd_clicked(self):
         file_path, selected_filter = QFileDialog.getOpenFileName(
@@ -811,98 +1067,128 @@ class MainWindow(QMainWindow):
         try:
             gsd_file = self.project.add_gsd_file(file_path)
         except ET.ParseError as error:
-            self.main_text_area.setText(
+            self.set_overview_text(
                 "Ошибка чтения XML-файла.\n\n"
                 f"Файл: {file_path}\n\n"
                 f"Ошибка XML:\n{error}"
             )
+            self.clear_io_table()
+            self.set_raw_data({})
             return
         except Exception as error:
-            self.main_text_area.setText(
+            self.set_overview_text(
                 "Не удалось загрузить GSDML/XML файл.\n\n"
                 f"Файл: {file_path}\n\n"
                 f"Ошибка:\n{error}"
             )
+            self.clear_io_table()
+            self.set_raw_data({})
             return
 
-        display_name = gsd_file.device_name or gsd_file.file_name
-
-        if gsd_file.vendor_name:
-            display_name = f"{gsd_file.vendor_name} — {display_name}"
-
-        item = QListWidgetItem(display_name)
-        item.setToolTip(gsd_file.file_path)
-
         file_index = len(self.project.loaded_gsd_files) - 1
-        item.setData(Qt.UserRole, file_index)
-
-        self.hardware_catalog.addItem(item)
-
+        self.add_gsd_file_to_hardware_catalog(file_index, gsd_file)
         self.show_gsd_file_info(gsd_file)
 
-    def on_gsd_file_dropped_to_project(self, file_index: int) -> bool:
+    def add_gsd_file_to_hardware_catalog(self, file_index: int, gsd_file: ProjectGsdFile):
+        """
+        Добавляет GSDML-файл в правый Hardware Catalog.
+
+        Справа показываем только варианты устройства / DAP.
+        ModuleItem не показываем отдельным деревом, потому что это состав выбранного DAP,
+        а не самостоятельные устройства для добавления в проект.
+        """
+
+        device = gsd_file.device
+
+        title = device.device_name or gsd_file.file_name
+
+        if device.vendor_name:
+            title = f"{device.vendor_name} — {title}"
+
+        file_item = QTreeWidgetItem([title])
+        file_item.setData(
+            0,
+            Qt.UserRole,
+            {
+                "type": "file",
+                "file_index": file_index,
+            },
+        )
+
+        dap_root_item = QTreeWidgetItem(["Варианты устройства / DAP"])
+
+        for dap_index, dap in enumerate(device.device_access_points):
+            dap_title = dap.display_name or dap.dns_compatible_name or dap.name or dap.dap_id
+
+            dap_item = QTreeWidgetItem([dap_title])
+            dap_item.setData(
+                0,
+                Qt.UserRole,
+                {
+                    "type": "dap",
+                    "file_index": file_index,
+                    "dap_index": dap_index,
+                },
+            )
+
+            dap_item.addChild(QTreeWidgetItem([f"ID: {dap.dap_id or '-'}"]))
+            dap_item.addChild(QTreeWidgetItem([f"DNS name: {dap.dns_compatible_name or '-'}"]))
+            dap_item.addChild(QTreeWidgetItem([f"Category: {dap.category_name or '-'}"]))
+            dap_item.addChild(QTreeWidgetItem([f"OrderNumber: {dap.order_number or '-'}"]))
+            dap_item.addChild(QTreeWidgetItem([f"SoftwareRelease: {dap.software_release or '-'}"]))
+            dap_item.addChild(QTreeWidgetItem([f"PhysicalSlots: {dap.physical_slots or '-'}"]))
+            dap_item.addChild(QTreeWidgetItem([f"UseableModules: {len(dap.module_refs)}"]))
+
+            dap_root_item.addChild(dap_item)
+
+        file_item.addChild(dap_root_item)
+
+        self.hardware_catalog.addTopLevelItem(file_item)
+
+        file_item.setExpanded(True)
+        dap_root_item.setExpanded(True)
+
+    def on_hardware_item_dropped_to_project(self, payload: dict) -> bool:
+        item_type = payload.get("type")
+        file_index = payload.get("file_index")
+
+        if item_type != "dap":
+            return False
+
+        if file_index is None:
+            return False
+
         if file_index < 0 or file_index >= len(self.project.loaded_gsd_files):
             return False
 
+        dap_index = payload.get("dap_index")
+
+        if dap_index is None:
+            return False
+
+        return self.add_dap_to_project(file_index, dap_index)
+
+    def add_dap_to_project(self, file_index: int, dap_index: int) -> bool:
         gsd_file = self.project.loaded_gsd_files[file_index]
         device = gsd_file.device
 
-        if not device.device_access_points:
-            QMessageBox.warning(
-                self,
-                "DAP не найден",
-                "В выбранном GSDML/XML файле не найден DeviceAccessPointItem."
-            )
+        if dap_index < 0 or dap_index >= len(device.device_access_points):
             return False
 
-        selected_dap = self.ask_user_to_select_dap(device)
-
-        if selected_dap is None:
-            return False
+        selected_dap = device.device_access_points[dap_index]
 
         instance = self.project.add_device_instance(file_index, selected_dap)
+
         self.add_device_instance_to_project_tree(instance)
         self.show_project_device_instance_info(instance)
 
         return True
 
-    def ask_user_to_select_dap(self, device: GsdmlDevice) -> GsdmlDeviceAccessPoint | None:
-        dap_items = []
-
-        for dap in device.device_access_points:
-            title_parts = []
-
-            if dap.name:
-                title_parts.append(dap.name)
-
-            if dap.dap_id:
-                title_parts.append(f"ID: {dap.dap_id}")
-
-            if dap.module_ident_number:
-                title_parts.append(f"ModuleIdentNumber: {dap.module_ident_number}")
-
-            dap_items.append(" | ".join(title_parts) if title_parts else "DAP")
-
-        selected_text, ok = QInputDialog.getItem(
-            self,
-            "Выбор DAP",
-            "Выберите DeviceAccessPointItem:",
-            dap_items,
-            0,
-            False,
-        )
-
-        if not ok:
-            return None
-
-        selected_index = dap_items.index(selected_text)
-
-        return device.device_access_points[selected_index]
-
     def add_device_instance_to_project_tree(self, instance: ProjectDeviceInstance):
         root_item = self.project_tree.topLevelItem(0)
 
         device = instance.gsd_file.device
+        dap = instance.selected_dap
 
         device_title = instance.instance_name
 
@@ -912,43 +1198,64 @@ class MainWindow(QMainWindow):
         device_item = QTreeWidgetItem([device_title])
         device_item.setData(0, Qt.UserRole, instance)
 
-        dap = instance.selected_dap
-
-        dap_item = QTreeWidgetItem([f"DAP: {dap.name or dap.dap_id or '-'}"])
+        dap_item = QTreeWidgetItem(
+            [f"Slot 0: DAP {dap.display_name or dap.dns_compatible_name or dap.name or dap.dap_id or '-'}"]
+        )
         dap_item.setData(0, Qt.UserRole, dap)
 
-        dap_item.addChild(QTreeWidgetItem([f"ID: {dap.dap_id or '-'}"]))
-        dap_item.addChild(QTreeWidgetItem([f"ModuleIdentNumber: {dap.module_ident_number or '-'}"]))
-        dap_item.addChild(QTreeWidgetItem([f"FixedInSlots: {dap.fixed_in_slots or '-'}"]))
-        dap_item.addChild(QTreeWidgetItem([f"Подмодулей: {len(dap.submodules)}"]))
+        slots_root_item = QTreeWidgetItem(["Слоты устройства"])
+        slots_root_item.setData(0, Qt.UserRole, {"type": "slots_root", "instance": instance})
 
-        modules_root_item = QTreeWidgetItem(["Доступные модули"])
+        for module_ref in dap.module_refs:
+            module = module_ref.module
 
-        for module in device.modules:
-            module_item = QTreeWidgetItem([module.name or module.module_id or "Module"])
-            module_item.setData(0, Qt.UserRole, module)
+            if module is None:
+                module_name = module_ref.module_item_target
+            else:
+                module_name = module.name or module.category_name or module.module_id
 
-            module_item.addChild(QTreeWidgetItem([f"ID: {module.module_id or '-'}"]))
-            module_item.addChild(QTreeWidgetItem([f"ModuleIdentNumber: {module.module_ident_number or '-'}"]))
-            module_item.addChild(QTreeWidgetItem([f"OrderNumber: {module.order_number or '-'}"]))
-            module_item.addChild(QTreeWidgetItem([f"Подмодулей: {len(module.submodules)}"]))
+            if module_ref.fixed_in_slots:
+                slot_text = f"FixedInSlots {module_ref.fixed_in_slots}: {module_name}"
+                slot_kind = "fixed"
+            elif module_ref.used_in_slots:
+                slot_text = f"UsedInSlots {module_ref.used_in_slots}: {module_name}"
+                slot_kind = "used"
+            elif module_ref.allowed_in_slots:
+                slot_text = f"AllowedInSlots {module_ref.allowed_in_slots}: {module_name}"
+                slot_kind = "allowed"
+            else:
+                slot_text = f"ModuleRef: {module_name}"
+                slot_kind = "unknown"
 
-            modules_root_item.addChild(module_item)
+            slot_item = QTreeWidgetItem([slot_text])
+            slot_item.setData(0, Qt.UserRole, module_ref)
+
+            slot_item.addChild(QTreeWidgetItem([f"Тип: {slot_kind}"]))
+            slot_item.addChild(QTreeWidgetItem([f"ModuleItemTarget: {module_ref.module_item_target or '-'}"]))
+
+            if module is not None:
+                slot_item.addChild(QTreeWidgetItem([f"ID: {module.module_id or '-'}"]))
+                slot_item.addChild(QTreeWidgetItem([f"OrderNumber: {module.order_number or '-'}"]))
+                slot_item.addChild(QTreeWidgetItem([f"Подмодулей: {len(module.submodules)}"]))
+
+            slots_root_item.addChild(slot_item)
 
         device_item.addChild(dap_item)
-        device_item.addChild(modules_root_item)
+        device_item.addChild(slots_root_item)
 
         root_item.addChild(device_item)
 
         root_item.setExpanded(True)
         device_item.setExpanded(True)
         dap_item.setExpanded(True)
-        modules_root_item.setExpanded(True)
+        slots_root_item.setExpanded(True)
 
     def show_gsd_file_info(self, gsd_file: ProjectGsdFile):
         device = gsd_file.device
 
-        self.main_text_area.setText(
+        self.clear_io_table()
+
+        self.set_overview_text(
             "GSDML/XML файл:\n\n"
             f"Проект: {self.project.project_name}\n"
             f"Имя файла: {gsd_file.file_name}\n"
@@ -970,38 +1277,102 @@ class MainWindow(QMainWindow):
             f"Семейство: {device.family or '-'}\n\n"
 
             f"ExternalTextList записей: {len(device.texts)}\n"
+            f"CategoryList записей: {len(device.categories)}\n"
             f"GraphicsList записей: {len(device.graphics)}\n"
             f"DeviceAccessPointItem: {len(device.device_access_points)}\n"
             f"ModuleItem: {len(device.modules)}\n\n"
 
-            f"{self.format_graphics_info(device)}\n"
-            f"{self.format_dap_info(device)}\n"
-            f"{self.format_modules_info(device)}\n"
+            f"{self.format_dap_list_info(device)}\n"
 
             f"Экземпляров устройств в проекте: {len(self.project.device_instances)}\n"
             f"Всего GSDML/XML файлов в проекте: {len(self.project.loaded_gsd_files)}"
+        )
+
+        self.set_raw_data(
+            {
+                "file": {
+                    "file_path": gsd_file.file_path,
+                    "file_name": gsd_file.file_name,
+                    "file_extension": gsd_file.file_extension,
+                    "root_tag": gsd_file.root_tag,
+                    "gsdml_version": gsd_file.gsdml_version,
+                },
+                "device": {
+                    "vendor_id": device.vendor_id,
+                    "device_id": device.device_id,
+                    "vendor_name": device.vendor_name,
+                    "device_name": device.device_name,
+                    "family": device.family,
+                    "texts_count": len(device.texts),
+                    "categories_count": len(device.categories),
+                    "graphics_count": len(device.graphics),
+                    "dap_count": len(device.device_access_points),
+                    "modules_count": len(device.modules),
+                },
+            }
         )
 
     def show_project_device_instance_info(self, instance: ProjectDeviceInstance):
         device = instance.gsd_file.device
         dap = instance.selected_dap
 
-        self.main_text_area.setText(
-            "Устройство добавлено в проект:\n\n"
+        self.fill_io_table_from_dap(dap)
+
+        self.set_overview_text(
+            "Устройство в проекте:\n\n"
             f"Экземпляр: {instance.instance_name}\n"
             f"Производитель: {device.vendor_name or '-'}\n"
-            f"Устройство: {device.device_name or '-'}\n\n"
+            f"Устройство из файла: {device.device_name or '-'}\n\n"
 
-            f"Выбранный DAP:\n"
+            f"Выбранный DAP / конкретное устройство:\n"
+            f"  Название: {dap.display_name or '-'}\n"
+            f"  Category: {dap.category_name or '-'}\n"
+            f"  DNS name: {dap.dns_compatible_name or '-'}\n"
+            f"  OrderNumber: {dap.order_number or '-'}\n"
+            f"  SoftwareRelease: {dap.software_release or '-'}\n"
+            f"  HardwareRelease: {dap.hardware_release or '-'}\n"
             f"  ID: {dap.dap_id or '-'}\n"
-            f"  Название: {dap.name or '-'}\n"
             f"  ModuleIdentNumber: {dap.module_ident_number or '-'}\n"
+            f"  PhysicalSlots: {dap.physical_slots or '-'}\n"
             f"  FixedInSlots: {dap.fixed_in_slots or '-'}\n"
-            f"  Подмодулей: {len(dap.submodules)}\n\n"
+            f"  UseableModules: {len(dap.module_refs)}\n\n"
 
-            f"Доступных модулей: {len(device.modules)}\n"
-            f"Экземпляров устройств в проекте: {len(self.project.device_instances)}"
+            f"{self.format_module_refs_info(dap)}"
         )
+
+        self.set_raw_data(
+            {
+                "instance_name": instance.instance_name,
+                "source_gsd_file_index": instance.source_gsd_file_index,
+                "selected_dap": self.dap_to_dict(dap),
+            }
+        )
+
+    def show_dap_info(self, dap: GsdmlDeviceAccessPoint):
+        self.fill_io_table_from_dap(dap)
+
+        self.set_overview_text(
+            "DeviceAccessPointItem / конкретное устройство:\n\n"
+            f"Название: {dap.display_name or '-'}\n"
+            f"Category: {dap.category_name or '-'}\n"
+            f"SubCategory: {dap.subcategory_name or '-'}\n"
+            f"DNS name: {dap.dns_compatible_name or '-'}\n"
+            f"OrderNumber: {dap.order_number or '-'}\n"
+            f"SoftwareRelease: {dap.software_release or '-'}\n"
+            f"HardwareRelease: {dap.hardware_release or '-'}\n"
+            f"ID: {dap.dap_id or '-'}\n"
+            f"ModuleIdentNumber: {dap.module_ident_number or '-'}\n"
+            f"PhysicalSlots: {dap.physical_slots or '-'}\n"
+            f"FixedInSlots: {dap.fixed_in_slots or '-'}\n"
+            f"GraphicRef: {dap.graphics_ref or '-'}\n"
+            f"Подмодулей DAP: {len(dap.submodules)}\n"
+            f"UseableModules: {len(dap.module_refs)}\n\n"
+
+            f"InfoText:\n{dap.info_text or '-'}\n\n"
+            f"{self.format_module_refs_info(dap)}"
+        )
+
+        self.set_raw_data(self.dap_to_dict(dap))
 
     def show_module_info(self, module: GsdmlModule):
         input_count = 0
@@ -1011,127 +1382,213 @@ class MainWindow(QMainWindow):
             input_count += len(submodule.input_items)
             output_count += len(submodule.output_items)
 
-        self.main_text_area.setText(
-            "GSDML модуль:\n\n"
+        self.fill_io_table_from_submodules(module.submodules)
+
+        self.set_overview_text(
+            "ModuleItem / элемент состава устройства:\n\n"
             f"Название: {module.name or '-'}\n"
+            f"Описание: {module.info_text or '-'}\n"
+            f"Category: {module.category_name or '-'}\n"
+            f"SubCategory: {module.subcategory_name or '-'}\n"
             f"ID: {module.module_id or '-'}\n"
             f"ModuleIdentNumber: {module.module_ident_number or '-'}\n"
             f"OrderNumber: {module.order_number or '-'}\n"
             f"Подмодулей: {len(module.submodules)}\n"
             f"Input DataItem: {input_count}\n"
             f"Output DataItem: {output_count}\n\n"
-            f"{self.format_submodules_info(module.submodules)}"
+            "Этот ModuleItem не является самостоятельным устройством. "
+            "Он используется внутри выбранного DAP через UseableModules."
         )
 
-    def show_dap_info(self, dap: GsdmlDeviceAccessPoint):
-        self.main_text_area.setText(
-            "DeviceAccessPointItem:\n\n"
-            f"Название: {dap.name or '-'}\n"
-            f"ID: {dap.dap_id or '-'}\n"
-            f"ModuleIdentNumber: {dap.module_ident_number or '-'}\n"
-            f"FixedInSlots: {dap.fixed_in_slots or '-'}\n"
-            f"GraphicRef: {dap.graphics_ref or '-'}\n"
-            f"Подмодулей: {len(dap.submodules)}\n\n"
-            f"{self.format_submodules_info(dap.submodules)}"
+        self.set_raw_data(self.module_to_dict(module))
+
+    def show_module_ref_info(self, module_ref: GsdmlModuleRef):
+        module = module_ref.module
+
+        if module is None:
+            self.clear_io_table()
+        else:
+            self.fill_io_table_from_submodules(module.submodules)
+
+        self.set_overview_text(
+            "UseableModules / ModuleItemRef:\n\n"
+            f"ModuleItemTarget: {module_ref.module_item_target or '-'}\n"
+            f"FixedInSlots: {module_ref.fixed_in_slots or '-'}\n"
+            f"UsedInSlots: {module_ref.used_in_slots or '-'}\n"
+            f"AllowedInSlots: {module_ref.allowed_in_slots or '-'}\n\n"
+            f"Связанный ModuleItem:\n"
+            f"  Название: {(module.name if module else '') or '-'}\n"
+            f"  ID: {(module.module_id if module else '') or '-'}\n"
+            f"  OrderNumber: {(module.order_number if module else '') or '-'}\n\n"
+            "FixedInSlots — модуль фиксирован в этих слотах.\n"
+            "UsedInSlots — модуль уже используется в этих слотах.\n"
+            "AllowedInSlots — допустимые слоты для выбора/установки."
         )
 
-    def format_graphics_info(self, device: GsdmlDevice) -> str:
-        if not device.graphics:
-            return "GraphicsList: графические элементы не найдены.\n\n"
+        self.set_raw_data(
+            {
+                "module_ref": module_ref.attributes,
+                "module": self.module_to_dict(module) if module else None,
+            }
+        )
 
-        lines = ["GraphicsList:"]
-
-        for graphic in device.graphics:
-            lines.append(f"  ID: {graphic.graphic_id or '-'}")
-            lines.append(f"  GraphicFile: {graphic.graphic_file or '-'}")
-
-            if graphic.file_exists:
-                lines.append(f"  Файл найден: {graphic.resolved_file_path}")
-            else:
-                lines.append("  Файл найден: нет")
-
-            lines.append("")
-
-        return "\n".join(lines)
-
-    def format_dap_info(self, device: GsdmlDevice) -> str:
+    def format_dap_list_info(self, device: GsdmlDevice) -> str:
         if not device.device_access_points:
-            return "DeviceAccessPointItem: не найдено.\n\n"
+            return "DAP не найдены.\n"
 
-        lines = ["DeviceAccessPointItem:"]
+        lines = ["Доступные DAP / варианты устройства:"]
 
         for dap in device.device_access_points:
-            lines.append(f"  ID: {dap.dap_id or '-'}")
-            lines.append(f"  Название: {dap.name or '-'}")
-            lines.append(f"  ModuleIdentNumber: {dap.module_ident_number or '-'}")
-            lines.append(f"  FixedInSlots: {dap.fixed_in_slots or '-'}")
-            lines.append(f"  GraphicRef: {dap.graphics_ref or '-'}")
-            lines.append(f"  Подмодулей: {len(dap.submodules)}")
+            lines.append(f"  - {dap.display_name or dap.dap_id or '-'}")
+            lines.append(f"    ID: {dap.dap_id or '-'}")
+            lines.append(f"    DNS name: {dap.dns_compatible_name or '-'}")
+            lines.append(f"    PhysicalSlots: {dap.physical_slots or '-'}")
+            lines.append(f"    UseableModules: {len(dap.module_refs)}")
             lines.append("")
 
         return "\n".join(lines)
 
-    def format_modules_info(self, device: GsdmlDevice) -> str:
-        if not device.modules:
-            return "ModuleItem: не найдено.\n\n"
+    def format_module_refs_info(self, dap: GsdmlDeviceAccessPoint) -> str:
+        if not dap.module_refs:
+            return "UseableModules: не найдено."
 
-        lines = ["ModuleItem:"]
+        lines = ["UseableModules / состав выбранного устройства:"]
 
-        max_modules_to_show = 20
+        for module_ref in dap.module_refs:
+            module = module_ref.module
+            module_name = module.name if module else module_ref.module_item_target
 
-        for index, module in enumerate(device.modules[:max_modules_to_show], start=1):
-            input_count = 0
-            output_count = 0
+            lines.append(f"  Module: {module_name or '-'}")
 
-            for submodule in module.submodules:
-                input_count += len(submodule.input_items)
-                output_count += len(submodule.output_items)
+            if module and module.info_text:
+                lines.append(f"    Описание: {module.info_text}")
 
-            lines.append(f"  {index}. {module.name or module.module_id or '-'}")
-            lines.append(f"     ID: {module.module_id or '-'}")
-            lines.append(f"     ModuleIdentNumber: {module.module_ident_number or '-'}")
-            lines.append(f"     OrderNumber: {module.order_number or '-'}")
-            lines.append(f"     Подмодулей: {len(module.submodules)}")
-            lines.append(f"     Input DataItem: {input_count}")
-            lines.append(f"     Output DataItem: {output_count}")
-            lines.append("")
+            if module and module.order_number:
+                lines.append(f"    OrderNumber: {module.order_number}")
 
-        if len(device.modules) > max_modules_to_show:
-            lines.append(
-                f"  ... показано {max_modules_to_show} из {len(device.modules)} модулей."
-            )
-            lines.append("")
+            if module and module.category_name:
+                lines.append(f"    Category: {module.category_name}")
 
-        return "\n".join(lines)
+            if module_ref.fixed_in_slots:
+                lines.append(f"    FixedInSlots: {module_ref.fixed_in_slots}")
 
-    def format_submodules_info(self, submodules: list[GsdmlSubmodule]) -> str:
-        if not submodules:
-            return "Подмодули: не найдены."
+            if module_ref.used_in_slots:
+                lines.append(f"    UsedInSlots: {module_ref.used_in_slots}")
 
-        lines = ["Подмодули:"]
+            if module_ref.allowed_in_slots:
+                lines.append(f"    AllowedInSlots: {module_ref.allowed_in_slots}")
 
-        for submodule in submodules:
-            lines.append(f"  Название: {submodule.name or '-'}")
-            lines.append(f"  ID: {submodule.submodule_id or '-'}")
-            lines.append(f"  SubmoduleIdentNumber: {submodule.submodule_ident_number or '-'}")
-            lines.append(f"  Тип: {submodule.kind or '-'}")
-            lines.append(f"  Input DataItem: {len(submodule.input_items)}")
-            lines.append(f"  Output DataItem: {len(submodule.output_items)}")
             lines.append("")
 
         return "\n".join(lines)
 
-    def on_hardware_catalog_item_clicked(self, item: QListWidgetItem):
-        file_index = item.data(Qt.UserRole)
+    def module_to_dict(self, module: GsdmlModule) -> dict:
+        return {
+            "module_id": module.module_id,
+            "name": module.name,
+            "text_id": module.text_id,
+            "info_text": module.info_text,
+            "module_ident_number": module.module_ident_number,
+            "order_number": module.order_number,
+            "category_ref": module.category_ref,
+            "category_name": module.category_name,
+            "subcategory_ref": module.subcategory_ref,
+            "subcategory_name": module.subcategory_name,
+            "attributes": module.attributes,
+            "submodules": [
+                {
+                    "submodule_id": submodule.submodule_id,
+                    "name": submodule.name,
+                    "text_id": submodule.text_id,
+                    "info_text": submodule.info_text,
+                    "submodule_ident_number": submodule.submodule_ident_number,
+                    "kind": submodule.kind,
+                    "attributes": submodule.attributes,
+                    "input_items": [item.attributes for item in submodule.input_items],
+                    "output_items": [item.attributes for item in submodule.output_items],
+                }
+                for submodule in module.submodules
+            ],
+        }
+
+    def dap_to_dict(self, dap: GsdmlDeviceAccessPoint) -> dict:
+        return {
+            "dap_id": dap.dap_id,
+            "name": dap.name,
+            "display_name": dap.display_name,
+            "category_ref": dap.category_ref,
+            "category_name": dap.category_name,
+            "subcategory_ref": dap.subcategory_ref,
+            "subcategory_name": dap.subcategory_name,
+            "dns_compatible_name": dap.dns_compatible_name,
+            "order_number": dap.order_number,
+            "hardware_release": dap.hardware_release,
+            "software_release": dap.software_release,
+            "info_text": dap.info_text,
+            "module_ident_number": dap.module_ident_number,
+            "fixed_in_slots": dap.fixed_in_slots,
+            "physical_slots": dap.physical_slots,
+            "graphics_ref": dap.graphics_ref,
+            "attributes": dap.attributes,
+            "module_refs": [
+                {
+                    "module_item_target": ref.module_item_target,
+                    "fixed_in_slots": ref.fixed_in_slots,
+                    "used_in_slots": ref.used_in_slots,
+                    "allowed_in_slots": ref.allowed_in_slots,
+                    "module_name": ref.module.name if ref.module else "",
+                    "module_order_number": ref.module.order_number if ref.module else "",
+                    "attributes": ref.attributes,
+                }
+                for ref in dap.module_refs
+            ],
+        }
+
+    def on_hardware_catalog_item_clicked(self, item: QTreeWidgetItem, column: int):
+        payload = item.data(0, Qt.UserRole)
+
+        if not isinstance(payload, dict):
+            self.set_overview_text(item.text(0))
+            self.clear_io_table()
+            self.set_raw_data({})
+            return
+
+        item_type = payload.get("type")
+        file_index = payload.get("file_index")
 
         if file_index is None:
+            self.set_overview_text(item.text(0))
+            self.clear_io_table()
+            self.set_raw_data({})
             return
 
         if file_index < 0 or file_index >= len(self.project.loaded_gsd_files):
             return
 
         gsd_file = self.project.loaded_gsd_files[file_index]
-        self.show_gsd_file_info(gsd_file)
+        device = gsd_file.device
+
+        if item_type == "file":
+            self.show_gsd_file_info(gsd_file)
+            return
+
+        if item_type == "dap":
+            dap_index = payload.get("dap_index")
+
+            if dap_index is not None and 0 <= dap_index < len(device.device_access_points):
+                self.show_dap_info(device.device_access_points[dap_index])
+                return
+
+        if item_type == "module":
+            module_index = payload.get("module_index")
+
+            if module_index is not None and 0 <= module_index < len(device.modules):
+                self.show_module_info(device.modules[module_index])
+                return
+
+        self.set_overview_text(item.text(0))
+        self.clear_io_table()
+        self.set_raw_data({})
 
     def on_project_tree_item_clicked(self, item: QTreeWidgetItem, column: int):
         obj = item.data(0, Qt.UserRole)
@@ -1144,11 +1601,13 @@ class MainWindow(QMainWindow):
             self.show_dap_info(obj)
             return
 
-        if isinstance(obj, GsdmlModule):
-            self.show_module_info(obj)
+        if isinstance(obj, GsdmlModuleRef):
+            self.show_module_ref_info(obj)
             return
 
-        self.main_text_area.setText(item.text(0))
+        self.set_overview_text(item.text(0))
+        self.clear_io_table()
+        self.set_raw_data({})
 
 
 def main():
