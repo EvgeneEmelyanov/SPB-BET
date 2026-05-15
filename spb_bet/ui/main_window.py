@@ -582,8 +582,10 @@ class MainWindow(QMainWindow):
 
             f"XML: {gsd_file.is_xml}\n"
             f"Корневой тег: {gsd_file.root_tag}\n"
-            f"GSDML version: {gsd_file.gsdml_version or '-'}\n\n"
-
+            f"GSDML version: {gsd_file.gsdml_version or '-'}\n"
+            f"Полная XSD-модель прочитана: {gsd_file.schema_model is not None}\n"
+            f"Тип XSD-модели: {type(gsd_file.schema_model).__name__ if gsd_file.schema_model is not None else '-'}\n\n"
+            f"Ошибка XSD-модели: {gsd_file.schema_model_error or '-'}\n\n"
             f"ProfileHeader найден: {gsd_file.has_profile_header}\n"
             f"ProfileBody найден: {gsd_file.has_profile_body}\n"
             f"DeviceIdentity найден: {gsd_file.has_device_identity}\n\n"

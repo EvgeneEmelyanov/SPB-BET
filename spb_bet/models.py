@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-
+from typing import Any
 
 @dataclass
 class GsdmlCategory:
@@ -145,6 +145,10 @@ class ProjectGsdFile:
     has_device_identity: bool = False
 
     file_name_info: GsdmlFileNameInfo = field(default_factory=GsdmlFileNameInfo)
+
+    schema_model: Any | None = None
+    schema_model_error: str = ""
+
     device: GsdmlDevice = field(default_factory=GsdmlDevice)
 
     @property

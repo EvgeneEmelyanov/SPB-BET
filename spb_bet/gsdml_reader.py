@@ -14,6 +14,8 @@ from spb_bet.models import (
     ProjectGsdFile,
 )
 
+from spb_bet.gsdml_full.schema_reader import GsdmlSchemaReader
+
 
 class GsdmlReader:
     @staticmethod
@@ -27,6 +29,11 @@ class GsdmlReader:
         )
 
         gsd_file.file_name_info = GsdmlReader.read_file_name_info(path.name)
+
+        from spb_bet.gsdml_full.schema_reader import GsdmlSchemaReader
+
+        gsd_file.schema_model = GsdmlSchemaReader.read(str(path))
+        gsd_file.schema_model_error = ""
 
         tree = ET.parse(path)
         root = tree.getroot()
