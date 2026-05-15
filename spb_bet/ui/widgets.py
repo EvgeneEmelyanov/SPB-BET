@@ -26,8 +26,6 @@ class HardwareCatalogTree(QTreeWidget):
         if not isinstance(payload, dict):
             return
 
-        # Перетаскиваем только DAP.
-        # ModuleItem пока остаётся частью состава выбранного DAP.
         if payload.get("type") != "dap":
             return
 

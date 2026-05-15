@@ -5,6 +5,7 @@ from spb_bet.models import (
     GsdmlCategory,
     GsdmlDevice,
     GsdmlDeviceAccessPoint,
+    GsdmlFileNameInfo,
     GsdmlGraphic,
     GsdmlIoDataItem,
     GsdmlModule,
@@ -24,6 +25,8 @@ class GsdmlReader:
             file_name=path.name,
             file_extension=path.suffix.lower(),
         )
+
+        gsd_file.file_name_info = GsdmlReader.read_file_name_info(path.name)
 
         tree = ET.parse(path)
         root = tree.getroot()
@@ -70,6 +73,28 @@ class GsdmlReader:
         gsd_file.device = device
 
         return gsd_file
+
+    @staticmethod
+    def read_file_name_info(file_name: str) -> GsdmlFileNameInfo:
+        result = GsdmlFileNameInfo(raw_file_name=file_name)
+
+        path = Path(file_name)
+        stem = path.stem
+        parts = stem.split("-")
+
+        if len(parts) < 5:
+            return result
+
+        if parts[0].upper() != "GSDML":
+            return result
+
+        result.is_valid_gsdml_name = True
+        result.gsdml_version = parts[1]
+        result.vendor_from_name = parts[2]
+        result.date_from_name = parts[-1]
+        result.device_family_from_name = "-".join(parts[3:-1])
+
+        return result
 
     @staticmethod
     def local_name(tag: str) -> str:

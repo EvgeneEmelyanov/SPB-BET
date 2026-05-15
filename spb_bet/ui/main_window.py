@@ -22,13 +22,15 @@ from PySide6.QtWidgets import (
 from spb_bet.models import (
     GsdmlDevice,
     GsdmlDeviceAccessPoint,
+    GsdmlIoDataItem,
     GsdmlModule,
     GsdmlModuleRef,
     GsdmlSubmodule,
     ProjectDeviceInstance,
     ProjectGsdFile,
+    ProjectSlot,
 )
-from spb_bet.project import SpbBetProject
+from spb_bet.project import SbpBetProject
 from spb_bet.ui.widgets import HardwareCatalogTree, ProjectTree
 
 
@@ -36,9 +38,9 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
 
-        self.project = SpbBetProject()
+        self.project = SbpBetProject()
 
-        self.setWindowTitle("SPB-BET")
+        self.setWindowTitle("SBP-BET")
         self.resize(1400, 800)
 
         self.create_menu()
@@ -63,7 +65,7 @@ class MainWindow(QMainWindow):
         self.project_tree = ProjectTree(self.on_hardware_item_dropped_to_project)
         self.project_tree.itemClicked.connect(self.on_project_tree_item_clicked)
 
-        root_item = QTreeWidgetItem(["Проект SPB-BET"])
+        root_item = QTreeWidgetItem(["Проект SBP-BET"])
         self.project_tree.addTopLevelItem(root_item)
         root_item.setExpanded(True)
 
@@ -71,6 +73,24 @@ class MainWindow(QMainWindow):
 
         self.overview_text_area = QTextEdit()
         self.overview_text_area.setReadOnly(True)
+
+        self.composition_table = QTableWidget()
+        self.composition_table.setColumnCount(9)
+        self.composition_table.setHorizontalHeaderLabels(
+            [
+                "Rule",
+                "Slots",
+                "Module",
+                "OrderNumber",
+                "Category",
+                "Input bytes",
+                "Output bytes",
+                "Input items",
+                "Output items",
+            ]
+        )
+        self.composition_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.composition_table.horizontalHeader().setStretchLastSection(True)
 
         self.io_data_table = QTableWidget()
         self.io_data_table.setColumnCount(8)
@@ -93,15 +113,16 @@ class MainWindow(QMainWindow):
         self.raw_text_area.setReadOnly(True)
 
         self.center_tabs.addTab(self.overview_text_area, "Обзор")
+        self.center_tabs.addTab(self.composition_table, "Состав устройства")
         self.center_tabs.addTab(self.io_data_table, "IO Data")
         self.center_tabs.addTab(self.raw_text_area, "Raw")
 
         self.set_overview_text(
-            "SPB-BET\n\n"
+            "SBP-BET\n\n"
             "1. Загрузите GSDML/XML через меню Проект.\n"
             "2. Справа появится дерево Hardware Catalog.\n"
             "3. Перетащите конкретный DAP справа налево, чтобы добавить устройство в проект.\n"
-            "4. ModuleItem справа пока используется как справочная информация."
+            "4. При выборе DAP смотрите вкладку «Состав устройства»."
         )
 
         right_panel = QWidget()
@@ -139,6 +160,141 @@ class MainWindow(QMainWindow):
 
     def clear_io_table(self):
         self.io_data_table.setRowCount(0)
+
+    def clear_composition_table(self):
+        self.composition_table.setRowCount(0)
+
+    def get_io_item_bit_length(self, item: GsdmlIoDataItem) -> int:
+        if item.bit_length:
+            try:
+                return int(item.bit_length)
+            except ValueError:
+                pass
+
+        data_type = item.data_type.lower()
+
+        known_sizes = {
+            "boolean": 1,
+            "bit": 1,
+            "integer8": 8,
+            "unsigned8": 8,
+            "integer16": 16,
+            "unsigned16": 16,
+            "integer32": 32,
+            "unsigned32": 32,
+            "float32": 32,
+            "float64": 64,
+        }
+
+        if data_type in known_sizes:
+            return known_sizes[data_type]
+
+        digits = "".join(ch for ch in item.data_type if ch.isdigit())
+
+        if digits:
+            try:
+                return int(digits)
+            except ValueError:
+                return 0
+
+        return 0
+
+    def get_module_io_summary(self, module: GsdmlModule) -> dict:
+        input_bits = 0
+        output_bits = 0
+        input_items = 0
+        output_items = 0
+
+        for submodule in module.submodules:
+            for item in submodule.input_items:
+                input_items += 1
+                input_bits += self.get_io_item_bit_length(item)
+
+            for item in submodule.output_items:
+                output_items += 1
+                output_bits += self.get_io_item_bit_length(item)
+
+        return {
+            "input_bits": input_bits,
+            "output_bits": output_bits,
+            "input_bytes": (input_bits + 7) // 8,
+            "output_bytes": (output_bits + 7) // 8,
+            "input_items": input_items,
+            "output_items": output_items,
+        }
+
+    def get_module_ref_rule(self, module_ref: GsdmlModuleRef) -> tuple[str, str]:
+        if module_ref.fixed_in_slots:
+            return "FixedInSlots", module_ref.fixed_in_slots
+
+        if module_ref.used_in_slots:
+            return "UsedInSlots", module_ref.used_in_slots
+
+        if module_ref.allowed_in_slots:
+            return "AllowedInSlots", module_ref.allowed_in_slots
+
+        return "Unknown", ""
+
+    def fill_composition_table_from_dap(self, dap: GsdmlDeviceAccessPoint):
+        rows = []
+
+        for module_ref in dap.module_refs:
+            module = module_ref.module
+            rule, slots = self.get_module_ref_rule(module_ref)
+
+            if module is None:
+                rows.append(
+                    {
+                        "rule": rule,
+                        "slots": slots,
+                        "module": module_ref.module_item_target,
+                        "order_number": "",
+                        "category": "",
+                        "input_bytes": "",
+                        "output_bytes": "",
+                        "input_items": "",
+                        "output_items": "",
+                    }
+                )
+                continue
+
+            io_summary = self.get_module_io_summary(module)
+
+            rows.append(
+                {
+                    "rule": rule,
+                    "slots": slots,
+                    "module": module.name or module.module_id,
+                    "order_number": module.order_number,
+                    "category": module.category_name,
+                    "input_bytes": io_summary["input_bytes"],
+                    "output_bytes": io_summary["output_bytes"],
+                    "input_items": io_summary["input_items"],
+                    "output_items": io_summary["output_items"],
+                }
+            )
+
+        self.composition_table.setRowCount(len(rows))
+
+        for row_index, row in enumerate(rows):
+            values = [
+                row["rule"],
+                row["slots"],
+                row["module"],
+                row["order_number"],
+                row["category"],
+                row["input_bytes"],
+                row["output_bytes"],
+                row["input_items"],
+                row["output_items"],
+            ]
+
+            for column_index, value in enumerate(values):
+                table_item = QTableWidgetItem(str(value))
+                table_item.setFlags(table_item.flags() & ~Qt.ItemIsEditable)
+                self.composition_table.setItem(row_index, column_index, table_item)
+
+        self.composition_table.resizeColumnsToContents()
 
     def fill_io_table_from_submodules(self, submodules: list[GsdmlSubmodule]):
         rows = []
@@ -210,6 +366,7 @@ class MainWindow(QMainWindow):
                 f"Ошибка XML:\n{error}"
             )
             self.clear_io_table()
+            self.clear_composition_table()
             self.set_raw_data({})
             return
         except Exception as error:
@@ -219,6 +376,7 @@ class MainWindow(QMainWindow):
                 f"Ошибка:\n{error}"
             )
             self.clear_io_table()
+            self.clear_composition_table()
             self.set_raw_data({})
             return
 
@@ -327,62 +485,87 @@ class MainWindow(QMainWindow):
         device_item = QTreeWidgetItem([device_title])
         device_item.setData(0, Qt.UserRole, instance)
 
-        dap_item = QTreeWidgetItem(
-            [f"Slot 0: DAP {dap.display_name or dap.dns_compatible_name or dap.name or dap.dap_id or '-'}"]
-        )
-        dap_item.setData(0, Qt.UserRole, dap)
-
         slots_root_item = QTreeWidgetItem(["Слоты устройства"])
         slots_root_item.setData(0, Qt.UserRole, {"type": "slots_root", "instance": instance})
 
-        for module_ref in dap.module_refs:
-            module = module_ref.module
+        for slot in instance.slots:
+            slot_item = QTreeWidgetItem([self.format_project_slot_title(slot, dap)])
+            slot_item.setData(0, Qt.UserRole, slot)
 
-            if module is None:
-                module_name = module_ref.module_item_target
-            else:
-                module_name = module.name or module.category_name or module.module_id
+            slot_item.addChild(QTreeWidgetItem([f"Номер слота: {slot.slot_number}"]))
+            slot_item.addChild(QTreeWidgetItem([f"Тип слота: {slot.slot_kind}"]))
 
-            if module_ref.fixed_in_slots:
-                slot_text = f"FixedInSlots {module_ref.fixed_in_slots}: {module_name}"
-                slot_kind = "fixed"
-            elif module_ref.used_in_slots:
-                slot_text = f"UsedInSlots {module_ref.used_in_slots}: {module_name}"
-                slot_kind = "used"
-            elif module_ref.allowed_in_slots:
-                slot_text = f"AllowedInSlots {module_ref.allowed_in_slots}: {module_name}"
-                slot_kind = "allowed"
-            else:
-                slot_text = f"ModuleRef: {module_name}"
-                slot_kind = "unknown"
+            if slot.slot_kind == "dap":
+                slot_item.addChild(QTreeWidgetItem([f"DAP: {dap.display_name or dap.name or dap.dap_id or '-'}"]))
+                slot_item.addChild(QTreeWidgetItem([f"ID: {dap.dap_id or '-'}"]))
+                slot_item.addChild(QTreeWidgetItem([f"OrderNumber: {dap.order_number or '-'}"]))
 
-            slot_item = QTreeWidgetItem([slot_text])
-            slot_item.setData(0, Qt.UserRole, module_ref)
-
-            slot_item.addChild(QTreeWidgetItem([f"Тип: {slot_kind}"]))
-            slot_item.addChild(QTreeWidgetItem([f"ModuleItemTarget: {module_ref.module_item_target or '-'}"]))
-
-            if module is not None:
+            if slot.installed_module is not None:
+                module = slot.installed_module
+                slot_item.addChild(QTreeWidgetItem([f"Модуль: {module.name or module.module_id or '-'}"]))
                 slot_item.addChild(QTreeWidgetItem([f"ID: {module.module_id or '-'}"]))
                 slot_item.addChild(QTreeWidgetItem([f"OrderNumber: {module.order_number or '-'}"]))
                 slot_item.addChild(QTreeWidgetItem([f"Подмодулей: {len(module.submodules)}"]))
 
+            if slot.allowed_modules:
+                allowed_root = QTreeWidgetItem([f"Доступные варианты: {len(slot.allowed_modules)}"])
+
+                for allowed_module in slot.allowed_modules:
+                    allowed_root.addChild(
+                        QTreeWidgetItem(
+                            [
+                                allowed_module.name
+                                or allowed_module.category_name
+                                or allowed_module.module_id
+                                or "Module"
+                            ]
+                        )
+                    )
+
+                slot_item.addChild(allowed_root)
+
             slots_root_item.addChild(slot_item)
 
-        device_item.addChild(dap_item)
         device_item.addChild(slots_root_item)
 
         root_item.addChild(device_item)
 
         root_item.setExpanded(True)
         device_item.setExpanded(True)
-        dap_item.setExpanded(True)
         slots_root_item.setExpanded(True)
+
+    def format_project_slot_title(
+            self,
+            slot: ProjectSlot,
+            dap: GsdmlDeviceAccessPoint,
+    ) -> str:
+        if slot.slot_kind == "dap":
+            dap_name = dap.display_name or dap.name or dap.dap_id or "DAP"
+            return f"Slot {slot.slot_number}: DAP {dap_name}"
+
+        if slot.installed_module is not None:
+            module = slot.installed_module
+            module_name = module.name or module.category_name or module.module_id or "Module"
+
+            if slot.slot_kind == "fixed":
+                return f"Slot {slot.slot_number}: {module_name} [fixed]"
+
+            if slot.slot_kind == "used":
+                return f"Slot {slot.slot_number}: {module_name} [used]"
+
+            return f"Slot {slot.slot_number}: {module_name}"
+
+        if slot.allowed_modules:
+            return f"Slot {slot.slot_number}: пустой [доступно {len(slot.allowed_modules)}]"
+
+        return f"Slot {slot.slot_number}: пустой"
 
     def show_gsd_file_info(self, gsd_file: ProjectGsdFile):
         device = gsd_file.device
+        file_name_info = gsd_file.file_name_info
 
         self.clear_io_table()
+        self.clear_composition_table()
 
         self.set_overview_text(
             "GSDML/XML файл:\n\n"
@@ -390,6 +573,12 @@ class MainWindow(QMainWindow):
             f"Имя файла: {gsd_file.file_name}\n"
             f"Расширение: {gsd_file.file_extension}\n"
             f"Полный путь: {gsd_file.file_path}\n\n"
+
+            f"Имя соответствует GSDML-шаблону: {file_name_info.is_valid_gsdml_name}\n"
+            f"Версия из имени файла: {file_name_info.gsdml_version or '-'}\n"
+            f"Производитель из имени файла: {file_name_info.vendor_from_name or '-'}\n"
+            f"Семейство устройства из имени файла: {file_name_info.device_family_from_name or '-'}\n"
+            f"Дата файла из имени файла: {file_name_info.date_from_name or '-'}\n\n"
 
             f"XML: {gsd_file.is_xml}\n"
             f"Корневой тег: {gsd_file.root_tag}\n"
@@ -425,6 +614,14 @@ class MainWindow(QMainWindow):
                     "file_extension": gsd_file.file_extension,
                     "root_tag": gsd_file.root_tag,
                     "gsdml_version": gsd_file.gsdml_version,
+                    "file_name_info": {
+                        "raw_file_name": file_name_info.raw_file_name,
+                        "is_valid_gsdml_name": file_name_info.is_valid_gsdml_name,
+                        "gsdml_version": file_name_info.gsdml_version,
+                        "vendor_from_name": file_name_info.vendor_from_name,
+                        "device_family_from_name": file_name_info.device_family_from_name,
+                        "date_from_name": file_name_info.date_from_name,
+                    },
                 },
                 "device": {
                     "vendor_id": device.vendor_id,
@@ -445,7 +642,8 @@ class MainWindow(QMainWindow):
         device = instance.gsd_file.device
         dap = instance.selected_dap
 
-        self.fill_io_table_from_dap(dap)
+        self.fill_io_table_from_project_instance(instance)
+        self.fill_composition_table_from_project_instance(instance)
 
         self.set_overview_text(
             "Устройство в проекте:\n\n"
@@ -464,9 +662,9 @@ class MainWindow(QMainWindow):
             f"  ModuleIdentNumber: {dap.module_ident_number or '-'}\n"
             f"  PhysicalSlots: {dap.physical_slots or '-'}\n"
             f"  FixedInSlots: {dap.fixed_in_slots or '-'}\n"
-            f"  UseableModules: {len(dap.module_refs)}\n\n"
+            f"  Слотов построено: {len(instance.slots)}\n\n"
 
-            f"{self.format_module_refs_info(dap)}"
+            f"{self.format_project_slots_info(instance)}"
         )
 
         self.set_raw_data(
@@ -474,11 +672,191 @@ class MainWindow(QMainWindow):
                 "instance_name": instance.instance_name,
                 "source_gsd_file_index": instance.source_gsd_file_index,
                 "selected_dap": self.dap_to_dict(dap),
+                "slots": [
+                    self.project_slot_to_dict(slot)
+                    for slot in instance.slots
+                ],
             }
         )
 
+    def show_project_slot_info(self, slot: ProjectSlot):
+        self.clear_composition_table()
+
+        if slot.installed_module is not None:
+            self.fill_io_table_from_submodules(slot.installed_module.submodules)
+        else:
+            self.clear_io_table()
+
+        overview_lines = [
+            "Слот устройства:\n",
+            f"Номер слота: {slot.slot_number}",
+            f"Тип слота: {slot.slot_kind}",
+            "",
+        ]
+
+        if slot.slot_kind == "dap":
+            overview_lines.append("Это слот базового устройства / DAP.")
+
+        if slot.installed_module is not None:
+            module = slot.installed_module
+
+            overview_lines.extend(
+                [
+                    "Установленный модуль:",
+                    f"  Название: {module.name or '-'}",
+                    f"  ID: {module.module_id or '-'}",
+                    f"  OrderNumber: {module.order_number or '-'}",
+                    f"  Category: {module.category_name or '-'}",
+                    f"  Подмодулей: {len(module.submodules)}",
+                    "",
+                ]
+            )
+
+        if slot.allowed_modules:
+            overview_lines.append("Доступные варианты для установки:")
+
+            for module in slot.allowed_modules:
+                overview_lines.append(
+                    f"  - {module.name or module.category_name or module.module_id or '-'}"
+                )
+
+        if not slot.installed_module and not slot.allowed_modules and slot.slot_kind != "dap":
+            overview_lines.append("Для этого слота нет установленного модуля и доступных вариантов.")
+
+        self.set_overview_text("\n".join(overview_lines))
+        self.set_raw_data(self.project_slot_to_dict(slot))
+
+    def format_project_slots_info(self, instance: ProjectDeviceInstance) -> str:
+        if not instance.slots:
+            return "Слоты устройства: не построены."
+
+        lines = ["Слоты устройства:"]
+
+        for slot in instance.slots:
+            if slot.slot_kind == "dap":
+                lines.append(f"  Slot {slot.slot_number}: DAP")
+                continue
+
+            if slot.installed_module is not None:
+                module = slot.installed_module
+                module_name = module.name or module.module_id or "-"
+                lines.append(f"  Slot {slot.slot_number}: {module_name} [{slot.slot_kind}]")
+                continue
+
+            if slot.allowed_modules:
+                lines.append(
+                    f"  Slot {slot.slot_number}: пустой, доступно вариантов: {len(slot.allowed_modules)}"
+                )
+                continue
+
+            lines.append(f"  Slot {slot.slot_number}: пустой")
+
+        return "\n".join(lines)
+
+    def project_slot_to_dict(self, slot: ProjectSlot) -> dict:
+        return {
+            "slot_number": slot.slot_number,
+            "slot_kind": slot.slot_kind,
+            "installed_module": self.module_to_dict(slot.installed_module)
+            if slot.installed_module is not None
+            else None,
+            "allowed_modules": [
+                self.module_to_dict(module)
+                for module in slot.allowed_modules
+            ],
+            "source_module_ref": slot.source_module_ref.attributes
+            if slot.source_module_ref is not None
+            else None,
+        }
+
+    def fill_io_table_from_project_instance(self, instance: ProjectDeviceInstance):
+        submodules = []
+
+        for slot in instance.slots:
+            if slot.installed_module is not None:
+                submodules.extend(slot.installed_module.submodules)
+
+        self.fill_io_table_from_submodules(submodules)
+
+    def fill_composition_table_from_project_instance(self, instance: ProjectDeviceInstance):
+        rows = []
+
+        for slot in instance.slots:
+            if slot.slot_kind == "dap":
+                rows.append(
+                    {
+                        "rule": "DAP",
+                        "slots": slot.slot_number,
+                        "module": instance.selected_dap.display_name or instance.selected_dap.name or "DAP",
+                        "order_number": instance.selected_dap.order_number,
+                        "category": instance.selected_dap.category_name,
+                        "input_bytes": "",
+                        "output_bytes": "",
+                        "input_items": "",
+                        "output_items": "",
+                    }
+                )
+                continue
+
+            if slot.installed_module is not None:
+                module = slot.installed_module
+                io_summary = self.get_module_io_summary(module)
+
+                rows.append(
+                    {
+                        "rule": slot.slot_kind,
+                        "slots": slot.slot_number,
+                        "module": module.name or module.module_id,
+                        "order_number": module.order_number,
+                        "category": module.category_name,
+                        "input_bytes": io_summary["input_bytes"],
+                        "output_bytes": io_summary["output_bytes"],
+                        "input_items": io_summary["input_items"],
+                        "output_items": io_summary["output_items"],
+                    }
+                )
+                continue
+
+            if slot.allowed_modules:
+                rows.append(
+                    {
+                        "rule": "allowed",
+                        "slots": slot.slot_number,
+                        "module": f"Пустой слот, вариантов: {len(slot.allowed_modules)}",
+                        "order_number": "",
+                        "category": "",
+                        "input_bytes": "",
+                        "output_bytes": "",
+                        "input_items": "",
+                        "output_items": "",
+                    }
+                )
+
+        self.composition_table.setRowCount(len(rows))
+
+        for row_index, row in enumerate(rows):
+            values = [
+                row["rule"],
+                row["slots"],
+                row["module"],
+                row["order_number"],
+                row["category"],
+                row["input_bytes"],
+                row["output_bytes"],
+                row["input_items"],
+                row["output_items"],
+            ]
+
+            for column_index, value in enumerate(values):
+                table_item = QTableWidgetItem(str(value))
+                table_item.setFlags(table_item.flags() & ~Qt.ItemIsEditable)
+                self.composition_table.setItem(row_index, column_index, table_item)
+
+        self.composition_table.resizeColumnsToContents()
+
     def show_dap_info(self, dap: GsdmlDeviceAccessPoint):
         self.fill_io_table_from_dap(dap)
+        self.fill_composition_table_from_dap(dap)
 
         self.set_overview_text(
             "DeviceAccessPointItem / конкретное устройство:\n\n"
@@ -512,6 +890,7 @@ class MainWindow(QMainWindow):
             output_count += len(submodule.output_items)
 
         self.fill_io_table_from_submodules(module.submodules)
+        self.clear_composition_table()
 
         self.set_overview_text(
             "ModuleItem / элемент состава устройства:\n\n"
@@ -533,6 +912,8 @@ class MainWindow(QMainWindow):
 
     def show_module_ref_info(self, module_ref: GsdmlModuleRef):
         module = module_ref.module
+
+        self.clear_composition_table()
 
         if module is None:
             self.clear_io_table()
@@ -679,6 +1060,7 @@ class MainWindow(QMainWindow):
         if not isinstance(payload, dict):
             self.set_overview_text(item.text(0))
             self.clear_io_table()
+            self.clear_composition_table()
             self.set_raw_data({})
             return
 
@@ -688,6 +1070,7 @@ class MainWindow(QMainWindow):
         if file_index is None:
             self.set_overview_text(item.text(0))
             self.clear_io_table()
+            self.clear_composition_table()
             self.set_raw_data({})
             return
 
@@ -708,15 +1091,9 @@ class MainWindow(QMainWindow):
                 self.show_dap_info(device.device_access_points[dap_index])
                 return
 
-        if item_type == "module":
-            module_index = payload.get("module_index")
-
-            if module_index is not None and 0 <= module_index < len(device.modules):
-                self.show_module_info(device.modules[module_index])
-                return
-
         self.set_overview_text(item.text(0))
         self.clear_io_table()
+        self.clear_composition_table()
         self.set_raw_data({})
 
     def on_project_tree_item_clicked(self, item: QTreeWidgetItem, column: int):
@@ -724,6 +1101,10 @@ class MainWindow(QMainWindow):
 
         if isinstance(obj, ProjectDeviceInstance):
             self.show_project_device_instance_info(obj)
+            return
+
+        if isinstance(obj, ProjectSlot):
+            self.show_project_slot_info(obj)
             return
 
         if isinstance(obj, GsdmlDeviceAccessPoint):
@@ -736,4 +1117,5 @@ class MainWindow(QMainWindow):
 
         self.set_overview_text(item.text(0))
         self.clear_io_table()
+        self.clear_composition_table()
         self.set_raw_data({})

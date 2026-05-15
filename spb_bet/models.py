@@ -18,6 +18,17 @@ class GsdmlGraphic:
 
 
 @dataclass
+class GsdmlFileNameInfo:
+    raw_file_name: str = ""
+    is_valid_gsdml_name: bool = False
+
+    gsdml_version: str = ""
+    vendor_from_name: str = ""
+    device_family_from_name: str = ""
+    date_from_name: str = ""
+
+
+@dataclass
 class GsdmlIoDataItem:
     direction: str = ""
     data_type: str = ""
@@ -133,6 +144,7 @@ class ProjectGsdFile:
     has_profile_body: bool = False
     has_device_identity: bool = False
 
+    file_name_info: GsdmlFileNameInfo = field(default_factory=GsdmlFileNameInfo)
     device: GsdmlDevice = field(default_factory=GsdmlDevice)
 
     @property
@@ -143,6 +155,38 @@ class ProjectGsdFile:
     def device_name(self) -> str:
         return self.device.device_name
 
+@dataclass
+class ProjectSlot:
+    slot_number: str
+    slot_kind: str = "empty"  # dap / fixed / used / allowed / empty
+
+    installed_module: GsdmlModule | None = None
+    allowed_modules: list[GsdmlModule] = field(default_factory=list)
+
+    source_module_ref: GsdmlModuleRef | None = None
+
+    @property
+    def is_occupied(self) -> bool:
+        return self.installed_module is not None or self.slot_kind == "dap"
+
+    @property
+    def title(self) -> str:
+        if self.slot_kind == "dap":
+            return f"Slot {self.slot_number}: DAP"
+
+        if self.installed_module is not None:
+            module_name = (
+                self.installed_module.name
+                or self.installed_module.category_name
+                or self.installed_module.module_id
+                or "Module"
+            )
+            return f"Slot {self.slot_number}: {module_name}"
+
+        if self.allowed_modules:
+            return f"Slot {self.slot_number}: пустой"
+
+        return f"Slot {self.slot_number}: пустой"
 
 @dataclass
 class ProjectDeviceInstance:
@@ -150,3 +194,5 @@ class ProjectDeviceInstance:
     source_gsd_file_index: int
     gsd_file: ProjectGsdFile
     selected_dap: GsdmlDeviceAccessPoint
+
+    slots: list[ProjectSlot] = field(default_factory=list)
