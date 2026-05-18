@@ -53,6 +53,13 @@ class GsdmlSchemaReader:
 
             return Iso15745Profile
 
+        if normalized_version == "2.31":
+            from spb_bet.gsdml_generated.v231.gsdml_device_profile_v2_31 import (
+                Iso15745Profile,
+            )
+
+            return Iso15745Profile
+
         if normalized_version == "2.33":
             from spb_bet.gsdml_generated.v233.gsdml_device_profile_v2_33 import (
                 Iso15745Profile,

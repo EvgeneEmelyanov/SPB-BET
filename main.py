@@ -1,17 +1,15 @@
-import sys
-
-from PySide6.QtWidgets import QApplication
+import wx
 
 from spb_bet.ui.main_window import MainWindow
 
 
 def main():
-    app = QApplication(sys.argv)
+    app = wx.App(False)
 
     window = MainWindow()
-    window.show()
+    window.Show()
 
-    sys.exit(app.exec())
+    app.MainLoop()
 
 
 if __name__ == "__main__":
